@@ -1,0 +1,5 @@
+pillow
+pdfplumber
+olefile
+python-docx
+pandas
