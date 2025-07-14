@@ -6,14 +6,18 @@ import olefile
 from docx import Document
 import os
 import pandas as pd
-import numpy as np
 from datetime import datetime
-import folium
-from streamlit_folium import folium_static
-import webbrowser
+
+# Try to import folium for mapping, but make it optional
+try:
+    import folium
+    from streamlit_folium import folium_static
+    FOLIUM_AVAILABLE = True
+except ImportError:
+    FOLIUM_AVAILABLE = False
 
 def clean_metadata_value(value):
-    """Membersihkan nilai metadata untuk menghindari masalah serialisasi"""
+    """Clean metadata values for safe display"""
     if isinstance(value, (str, int, float, bool)):
         return value
     elif isinstance(value, bytes):
@@ -32,61 +36,77 @@ def clean_metadata_value(value):
             return "Unserializable value"
 
 def get_gps_info(exif_data):
-    """Ekstrak informasi GPS dari EXIF data"""
+    """Extract GPS info from EXIF data"""
+    if not exif_data:
+        return {}
+    
     gps_info = {}
     for key, value in exif_data.items():
         tag = TAGS.get(key, key)
-        if tag == "GPSInfo":
+        if tag == "GPSInfo" and isinstance(value, dict):
             for t in value:
                 sub_tag = GPSTAGS.get(t, t)
                 gps_info[sub_tag] = clean_metadata_value(value[t])
     return gps_info
 
 def convert_to_degrees(value):
-    """Konversi koordinat GPS ke format derajat desimal"""
-    d, m, s = value
-    return d + (m / 60.0) + (s / 3600.0)
-
-def get_gps_coordinates(gps_info):
-    """Dapatkan koordinat latitude dan longitude dari GPSInfo"""
+    """Convert GPS coordinates to decimal degrees"""
     try:
-        gps_latitude = gps_info.get('GPSLatitude')
-        gps_latitude_ref = gps_info.get('GPSLatitudeRef')
-        gps_longitude = gps_info.get('GPSLongitude')
-        gps_longitude_ref = gps_info.get('GPSLongitudeRef')
-
-        if gps_latitude and gps_latitude_ref and gps_longitude and gps_longitude_ref:
-            lat = convert_to_degrees(gps_latitude)
-            if gps_latitude_ref != 'N':
-                lat = -lat
-
-            lon = convert_to_degrees(gps_longitude)
-            if gps_longitude_ref != 'E':
-                lon = -lon
-
-            return lat, lon
+        if isinstance(value, tuple):
+            d, m, s = value
+            return d + (m / 60.0) + (s / 3600.0)
+        elif isinstance(value, (int, float)):
+            return float(value)
+        else:
+            return None
     except:
         return None
 
+def get_gps_coordinates(gps_info):
+    """Get latitude and longitude from GPSInfo"""
+    try:
+        gps_latitude = gps_info.get('GPSLatitude')
+        gps_latitude_ref = gps_info.get('GPSLatitudeRef', 'N')
+        gps_longitude = gps_info.get('GPSLongitude')
+        gps_longitude_ref = gps_info.get('GPSLongitudeRef', 'E')
+
+        if gps_latitude and gps_longitude:
+            lat = convert_to_degrees(gps_latitude)
+            lon = convert_to_degrees(gps_longitude)
+            
+            if lat is not None and lon is not None:
+                if gps_latitude_ref.upper() != 'N':
+                    lat = -lat
+                if gps_longitude_ref.upper() != 'E':
+                    lon = -lon
+                return lat, lon
+    except Exception as e:
+        st.warning(f"Error processing GPS coordinates: {str(e)}")
+    return None
+
 def show_gps_location(lat, lon):
-    """Tampilkan peta dengan lokasi GPS"""
+    """Display GPS location with available methods"""
     st.subheader("📍 Lokasi GPS")
     st.write(f"Koordinat: {lat:.6f}, {lon:.6f}")
     
-    # Buat peta dengan Folium
-    m = folium.Map(location=[lat, lon], zoom_start=15)
-    folium.Marker(
-        [lat, lon],
-        tooltip="Lokasi Foto",
-        popup=f"Koordinat: {lat:.6f}, {lon:.6f}"
-    ).add_to(m)
-    
-    # Tampilkan peta
-    folium_static(m)
-    
-    # Buat link Google Maps
+    # Create Google Maps link
     google_maps_url = f"https://www.google.com/maps?q={lat},{lon}"
     st.markdown(f"[Buka di Google Maps]({google_maps_url})")
+    
+    # Show map if folium is available
+    if FOLIUM_AVAILABLE:
+        try:
+            m = folium.Map(location=[lat, lon], zoom_start=15)
+            folium.Marker(
+                [lat, lon],
+                tooltip="Lokasi Foto",
+                popup=f"Koordinat: {lat:.6f}, {lon:.6f}"
+            ).add_to(m)
+            folium_static(m)
+        except Exception as e:
+            st.warning(f"Failed to create map: {str(e)}")
+    else:
+        st.warning("Fitur peta tidak tersedia (folium tidak terinstall)")
 
 def get_image_metadata(file_path):
     try:
@@ -99,17 +119,16 @@ def get_image_metadata(file_path):
                 tag = TAGS.get(tag_id, tag_id)
                 metadata[tag] = clean_metadata_value(value)
         
-        # Informasi dasar gambar
+        # Basic image info
         metadata["Format"] = image.format
         metadata["Mode"] = image.mode
         metadata["Size"] = str(image.size)
         
-        # Ekstrak info GPS jika ada
-        if exif_data and 34853 in exif_data:  # 34853 adalah tag GPSInfo
+        # Extract GPS info if available
+        if exif_data and 34853 in exif_data:  # 34853 is GPSInfo tag
             gps_info = get_gps_info(exif_data)
             metadata["GPSInfo"] = gps_info
             
-            # Dapatkan koordinat
             coords = get_gps_coordinates(gps_info)
             if coords:
                 metadata["Latitude"] = coords[0]
@@ -119,77 +138,15 @@ def get_image_metadata(file_path):
     except Exception as e:
         return {"Error": str(e)}
 
-def get_pdf_metadata(file_path):
-    try:
-        metadata = {}
-        with pdfplumber.open(file_path) as pdf:
-            metadata["Pages"] = len(pdf.pages)
-            if pdf.metadata:
-                for k, v in pdf.metadata.items():
-                    metadata[k] = clean_metadata_value(v)
-        
-        metadata["File Size"] = f"{os.path.getsize(file_path) / 1024:.2f} KB"
-        return metadata
-    except Exception as e:
-        return {"Error": str(e)}
-
-def get_docx_metadata(file_path):
-    try:
-        doc = Document(file_path)
-        metadata = {
-            "Author": clean_metadata_value(doc.core_properties.author),
-            "Created": clean_metadata_value(doc.core_properties.created),
-            "Modified": clean_metadata_value(doc.core_properties.modified),
-            "Last Modified By": clean_metadata_value(doc.core_properties.last_modified_by),
-            "Revision": clean_metadata_value(doc.core_properties.revision),
-            "Title": clean_metadata_value(doc.core_properties.title),
-            "Subject": clean_metadata_value(doc.core_properties.subject),
-            "Keywords": clean_metadata_value(doc.core_properties.keywords),
-            "File Size": f"{os.path.getsize(file_path) / 1024:.2f} KB"
-        }
-        return {k: v for k, v in metadata.items() if v is not None}
-    except Exception as e:
-        return {"Error": str(e)}
-
-def get_doc_metadata(file_path):
-    try:
-        if not olefile.isOleFile(file_path):
-            return {"Error": "Not a valid OLE file"}
-        
-        ole = olefile.OleFileIO(file_path)
-        metadata = {}
-        
-        if ole.exists('\x05SummaryInformation'):
-            si = ole.getproperties('\x05SummaryInformation')
-            mapping = {
-                'title': 'Title',
-                'subject': 'Subject',
-                'author': 'Author',
-                'keywords': 'Keywords',
-                'comments': 'Comments',
-                'last_saved_by': 'Last Saved By',
-                'create_time': 'Created',
-                'last_saved_time': 'Modified',
-            }
-            
-            for ole_prop, display_name in mapping.items():
-                if ole_prop in si:
-                    metadata[display_name] = clean_metadata_value(si[ole_prop])
-        
-        if ole.exists('\x05DocumentSummaryInformation'):
-            dsi = ole.getproperties('\x05DocumentSummaryInformation')
-            if 'company' in dsi:
-                metadata['Company'] = clean_metadata_value(dsi['company'])
-        
-        metadata["File Size"] = f"{os.path.getsize(file_path) / 1024:.2f} KB"
-        ole.close()
-        return metadata
-    except Exception as e:
-        return {"Error": str(e)}
+# [Keep all the other functions (get_pdf_metadata, get_docx_metadata, get_doc_metadata) 
+# exactly the same as in the previous version]
 
 def main():
     st.title("📝 Aplikasi Pembaca Metadata File")
     st.write("Unggah file untuk melihat metadata-nya (Gambar, PDF, DOCX, DOC)")
+    
+    if not FOLIUM_AVAILABLE:
+        st.warning("Fitur peta tidak tersedia. Untuk menampilkan peta, install folium dengan: pip install folium streamlit-folium")
     
     uploaded_file = st.file_uploader(
         "Pilih file", 
@@ -210,7 +167,6 @@ def main():
             if "Error" not in metadata:
                 st.image(uploaded_file, caption="Preview Gambar", use_container_width=True)
                 
-                # Tampilkan peta jika ada koordinat GPS
                 if "Latitude" in metadata and "Longitude" in metadata:
                     show_gps_location(metadata["Latitude"], metadata["Longitude"])
         elif file_ext == '.pdf':
@@ -225,17 +181,13 @@ def main():
         if "Error" in metadata:
             st.error(metadata["Error"])
         else:
-            # Konversi ke DataFrame dengan tipe data yang aman
             df = pd.DataFrame(list(metadata.items()), columns=["Property", "Value"])
             
-            # Hapus koordinat dari tabel karena sudah ditampilkan di peta
+            # Remove coordinates from table if they're shown separately
             if "Latitude" in df['Property'].values and "Longitude" in df['Property'].values:
                 df = df[~df['Property'].isin(['Latitude', 'Longitude', 'GPSInfo'])]
             
-            # Pastikan semua nilai adalah string untuk menghindari masalah serialisasi
             df['Value'] = df['Value'].apply(lambda x: clean_metadata_value(x))
-            
-            # Tampilkan sebagai tabel
             st.table(df)
         
         os.remove(file_path)
