@@ -3,3 +3,4 @@ pdfplumber
 olefile
 python-docx
 pandas
+numpy
