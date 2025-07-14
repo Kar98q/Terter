@@ -4,3 +4,5 @@ olefile
 python-docx
 pandas
 numpy
+folium>=0.14.0
+streamlit-folium>=0.10.0
